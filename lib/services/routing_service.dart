@@ -4,13 +4,17 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/nav_route.dart';
 import '../models/obstacle.dart';
+import 'campus_graph_service.dart';
 
 /// Communicates with the OpenRouteService Directions API.
 class RoutingService {
   /// Creates a [RoutingService] with a pre-configured [Dio] client.
-  RoutingService() : _dio = Dio();
+  RoutingService()
+      : _dio = Dio(),
+        _campusGraphService = CampusGraphService();
 
   final Dio _dio;
+  final CampusGraphService _campusGraphService;
 
   static const _baseUrl =
       'https://api.openrouteservice.org/v2/directions/foot-walking/geojson';
@@ -19,13 +23,28 @@ class RoutingService {
   ///
   /// Sends a POST request to the ORS foot-walking endpoint with
   /// dynamically generated `avoid_polygons` built from the active
-  /// obstacle list. Returns a [NavRoute] on success, or `null` if
-  /// no accessible route can be found (HTTP 404).
+  /// obstacle list. If routing within campus area, uses the local
+  /// [CampusGraphService] footpath network. Returns a [NavRoute] on success,
+  /// or `null` if no accessible route can be found (HTTP 404).
   Future<NavRoute?> fetchAccessibleRoute({
     required LatLng start,
     required LatLng destination,
     required List<Obstacle> obstacles,
   }) async {
+    // 1. Campus zone priority check
+    if (_campusGraphService.isInCampusArea(start, destination)) {
+      final campusRoute = _campusGraphService.findCampusRoute(
+        start,
+        destination,
+        obstacles,
+      );
+      if (campusRoute != null) {
+        return campusRoute;
+      }
+      // If campus graph finds no accessible path due to obstacles, return null
+      // so the UI can show the clear obstacles banner.
+      return null;
+    }
     final apiKey = dotenv.env['ORS_API_KEY'];
     if (apiKey == null || apiKey.isEmpty) {
       throw Exception('ORS_API_KEY not found in .env file.');

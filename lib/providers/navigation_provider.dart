@@ -12,6 +12,8 @@ class NavigationState {
   /// Creates a navigation state snapshot.
   const NavigationState({
     this.destination,
+    this.destinationName,
+    this.selectedPinpoint,
     this.activeRoute,
     this.isLoading = false,
     this.errorMessage,
@@ -19,6 +21,12 @@ class NavigationState {
 
   /// The user-selected destination, or `null` if not yet set.
   final LatLng? destination;
+
+  /// Optional display name of destination.
+  final String? destinationName;
+
+  /// Temporary pinpoint placed by single-tapping the map.
+  final LatLng? selectedPinpoint;
 
   /// The currently computed route, or `null` if unavailable.
   final NavRoute? activeRoute;
@@ -32,15 +40,20 @@ class NavigationState {
   /// Creates a copy with the given fields replaced.
   NavigationState copyWith({
     LatLng? destination,
+    String? destinationName,
+    LatLng? selectedPinpoint,
     NavRoute? activeRoute,
     bool? isLoading,
     String? errorMessage,
     bool clearRoute = false,
     bool clearError = false,
     bool clearDestination = false,
+    bool clearPinpoint = false,
   }) {
     return NavigationState(
       destination: clearDestination ? null : (destination ?? this.destination),
+      destinationName: clearDestination ? null : (destinationName ?? this.destinationName),
+      selectedPinpoint: clearPinpoint ? null : (selectedPinpoint ?? this.selectedPinpoint),
       activeRoute: clearRoute ? null : (activeRoute ?? this.activeRoute),
       isLoading: isLoading ?? this.isLoading,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
@@ -48,7 +61,7 @@ class NavigationState {
   }
 }
 
-/// Provides the navigation state including destination and active route.
+/// Provides the navigation state including destination, pinpoint, and active route.
 final navigationProvider =
     StateNotifierProvider<NavigationNotifier, NavigationState>((ref) {
   return NavigationNotifier(ref);
@@ -67,13 +80,50 @@ class NavigationNotifier extends StateNotifier<NavigationState> {
   final Ref _ref;
   final RoutingService _routingService = RoutingService();
 
+  /// Default fallback start point (GECA Main Gate) if device GPS is not available.
+  static const LatLng defaultCampusStart = LatLng(26.44915, 74.70310);
+
+  /// Sets or updates the temporary pinpoint on the map.
+  void setPinpoint(LatLng pinpoint) {
+    state = state.copyWith(selectedPinpoint: pinpoint);
+  }
+
+  /// Clears the temporary map pinpoint.
+  void clearPinpoint() {
+    state = state.copyWith(clearPinpoint: true);
+  }
+
   /// Sets the navigation destination and triggers a route calculation.
-  Future<void> setDestination(LatLng destination) async {
+  Future<void> setDestination(LatLng destination, {String? destinationName}) async {
     state = state.copyWith(
       destination: destination,
+      destinationName: destinationName,
       clearError: true,
       clearRoute: true,
+      clearPinpoint: true,
     );
+    await _recalculateIfReady();
+  }
+
+  /// Routes from user's current GPS location (or fallback campus location) to [destination].
+  Future<void> routeFromCurrentLocationTo(
+    LatLng destination, {
+    String? destinationName,
+  }) async {
+    // If device location is unavailable, ensure start location is initialized to campus fallback
+    final currentLoc = _ref.read(locationProvider);
+    if (currentLoc == null) {
+      _ref.read(locationProvider.notifier).setLocation(defaultCampusStart);
+    }
+
+    state = state.copyWith(
+      destination: destination,
+      destinationName: destinationName,
+      clearError: true,
+      clearRoute: true,
+      clearPinpoint: true,
+    );
+
     await _recalculateIfReady();
   }
 
@@ -82,16 +132,22 @@ class NavigationNotifier extends StateNotifier<NavigationState> {
     await _recalculateIfReady();
   }
 
-  /// Clears the current destination and route.
+  /// Clears the current destination, pinpoint, and route.
   void clearNavigation() {
     state = const NavigationState();
   }
 
   Future<void> _recalculateIfReady() async {
-    final start = _ref.read(locationProvider);
+    var start = _ref.read(locationProvider);
     final destination = state.destination;
 
-    if (start == null || destination == null) return;
+    if (destination == null) return;
+
+    // Use default fallback if start is still null
+    if (start == null) {
+      start = defaultCampusStart;
+      _ref.read(locationProvider.notifier).setLocation(defaultCampusStart);
+    }
 
     state = state.copyWith(isLoading: true, clearError: true);
 

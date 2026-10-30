@@ -8,7 +8,10 @@ import '../models/obstacle.dart';
 import '../providers/location_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/obstacle_provider.dart';
+import '../services/geocoding_service.dart';
 import 'widgets/add_obstacle_dialog.dart';
+import 'widgets/pinpoint_action_card.dart';
+import 'widgets/place_search_bar.dart';
 import 'widgets/route_info_banner.dart';
 
 /// The primary map screen displaying tiles, obstacles, and the active route.
@@ -22,12 +25,9 @@ class MapScreen extends ConsumerStatefulWidget {
 
 class _MapScreenState extends ConsumerState<MapScreen> {
   final _mapController = MapController();
-  final _startController = TextEditingController();
-  final _destController = TextEditingController();
-  bool _searchBarExpanded = false;
 
-  /// Default center: Heidelberg, Germany.
-  static const _defaultCenter = LatLng(49.4094, 8.6940);
+  /// Default center: Government Engineering College, Ajmer.
+  static const _defaultCenter = LatLng(26.4482, 74.7028);
 
   @override
   void initState() {
@@ -42,19 +42,19 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final error =
         await ref.read(locationProvider.notifier).fetchCurrentLocation();
     if (error != null && mounted) {
+      // In case GPS is denied or unavailable, set to college campus center
+      ref.read(locationProvider.notifier).setLocation(_defaultCenter);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Location unavailable: $error'),
-          action: SnackBarAction(
-            label: 'Retry',
-            onPressed: _initLocation,
-          ),
+          content: Text('Location note: $error. Defaulted to Campus.'),
+          duration: const Duration(seconds: 3),
         ),
       );
+      _mapController.move(_defaultCenter, 16);
     } else {
       final location = ref.read(locationProvider);
       if (location != null) {
-        _mapController.move(location, 15);
+        _mapController.move(location, 16);
       }
     }
   }
@@ -62,11 +62,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   @override
   void dispose() {
     _mapController.dispose();
-    _startController.dispose();
-    _destController.dispose();
     super.dispose();
   }
 
+  /// Single tap on map: places or moves temporary pinpoint
+  void _onMapTap(TapPosition tapPosition, LatLng position) {
+    ref.read(navigationProvider.notifier).setPinpoint(position);
+  }
+
+  /// Long press on map: opens Add Obstacle dialog
   void _onLongPress(TapPosition tapPosition, LatLng position) {
     showModalBottomSheet<void>(
       context: context,
@@ -75,39 +79,45 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     );
   }
 
-  void _handleSearch() {
-    final startParts = _startController.text.trim().split(',');
-    final destParts = _destController.text.trim().split(',');
+  void _onPlaceSelected(PlaceSuggestion place) {
+    ref.read(navigationProvider.notifier).routeFromCurrentLocationTo(
+          place.location,
+          destinationName: place.name,
+        );
 
-    if (startParts.length != 2 || destParts.length != 2) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enter coordinates as "lat, lng" for both fields.'),
-        ),
-      );
+    final userLoc = ref.read(locationProvider) ?? _defaultCenter;
+    _fitPointsToMap([userLoc, place.location]);
+  }
+
+  void _routeToPinpoint(LatLng pinpoint) {
+    ref.read(navigationProvider.notifier).routeFromCurrentLocationTo(
+          pinpoint,
+          destinationName: 'Custom Pinpoint',
+        );
+
+    final userLoc = ref.read(locationProvider) ?? _defaultCenter;
+    _fitPointsToMap([userLoc, pinpoint]);
+  }
+
+  void _fitPointsToMap(List<LatLng> points) {
+    if (points.isEmpty) return;
+    if (points.length == 1) {
+      _mapController.move(points.first, 16);
       return;
     }
 
-    try {
-      final startLat = double.parse(startParts[0].trim());
-      final startLng = double.parse(startParts[1].trim());
-      final destLat = double.parse(destParts[0].trim());
-      final destLng = double.parse(destParts[1].trim());
-
-      ref
-          .read(locationProvider.notifier)
-          .setLocation(LatLng(startLat, startLng));
-      ref
-          .read(navigationProvider.notifier)
-          .setDestination(LatLng(destLat, destLng));
-
-      setState(() => _searchBarExpanded = false);
-      FocusScope.of(context).unfocus();
-    } on FormatException {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid coordinate format.')),
-      );
-    }
+    final bounds = LatLngBounds.fromPoints(points);
+    _mapController.fitCamera(
+      CameraFit.bounds(
+        bounds: bounds,
+        padding: const EdgeInsets.only(
+          top: 100,
+          bottom: 120,
+          left: 40,
+          right: 40,
+        ),
+      ),
+    );
   }
 
   IconData _obstacleIcon(ObstacleType type) {
@@ -154,19 +164,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             mapController: _mapController,
             options: MapOptions(
               initialCenter: userLocation ?? _defaultCenter,
-              initialZoom: 15.0,
+              initialZoom: 16.0,
               minZoom: 3.0,
               maxZoom: 18.0,
+              onTap: _onMapTap,
               onLongPress: _onLongPress,
               interactionOptions: const InteractionOptions(
                 flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
               ),
             ),
             children: [
-              // Layer 1: OSM Tiles
+              // Layer 1: OSM Tiles (cache-busted to fetch newly mapped college buildings)
               TileLayer(
                 urlTemplate:
-                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png?v=2',
                 userAgentPackageName: 'com.accessroute.access_route',
                 maxZoom: 19,
                 tileProvider: CancellableNetworkTileProvider(),
@@ -178,7 +189,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   polylines: [
                     Polyline(
                       points: navState.activeRoute!.points,
-                      strokeWidth: 5.0,
+                      strokeWidth: 5.5,
                       color: const Color(0xFF42A5F5),
                       borderStrokeWidth: 2.0,
                       borderColor: const Color(0xFF1565C0),
@@ -202,7 +213,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                           shape: BoxShape.circle,
                           border: Border.all(
                             color: const Color(0xFF4CAF50),
-                            width: 2,
+                            width: 2.5,
                           ),
                         ),
                         child: const Center(
@@ -219,13 +230,39 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   if (navState.destination != null)
                     Marker(
                       point: navState.destination!,
-                      width: 40,
-                      height: 40,
+                      width: 44,
+                      height: 44,
                       alignment: Alignment.topCenter,
                       child: const Icon(
                         Icons.location_on,
                         color: Color(0xFFEF5350),
-                        size: 40,
+                        size: 44,
+                      ),
+                    ),
+
+                  // Temporary Single-Tap Pinpoint marker
+                  if (navState.selectedPinpoint != null)
+                    Marker(
+                      point: navState.selectedPinpoint!,
+                      width: 42,
+                      height: 42,
+                      alignment: Alignment.topCenter,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFFAB47BC).withAlpha(140),
+                              blurRadius: 10,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.place_rounded,
+                          color: Color(0xFFBA68C8),
+                          size: 42,
+                        ),
                       ),
                     ),
 
@@ -270,19 +307,37 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ],
           ),
 
-          // ── Floating search bar ──
+          // ── Autocomplete Place Search Bar (top) ──
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _buildSearchBar(),
-                  if (_searchBarExpanded) _buildSearchFields(),
-                ],
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: PlaceSearchBar(
+                userLocation: userLocation,
+                currentDestinationName: navState.destinationName,
+                onPlaceSelected: _onPlaceSelected,
+                onClear: () {
+                  ref.read(navigationProvider.notifier).clearNavigation();
+                },
               ),
             ),
           ),
+
+          // ── Pinpoint Action Card (floating above bottom when pinpoint is set) ──
+          if (navState.selectedPinpoint != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: navState.activeRoute != null ? 95 : 20,
+              child: SafeArea(
+                child: PinpointActionCard(
+                  pinpoint: navState.selectedPinpoint!,
+                  onRouteHere: () => _routeToPinpoint(navState.selectedPinpoint!),
+                  onDismiss: () {
+                    ref.read(navigationProvider.notifier).clearPinpoint();
+                  },
+                ),
+              ),
+            ),
 
           // ── Route info banner (bottom) ──
           const Positioned(
@@ -310,129 +365,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       // ── My location FAB ──
       floatingActionButton: Padding(
         padding: EdgeInsets.only(
-          bottom: navState.activeRoute != null ? 100 : 0,
+          bottom: navState.activeRoute != null
+              ? (navState.selectedPinpoint != null ? 170 : 100)
+              : (navState.selectedPinpoint != null ? 90 : 16),
         ),
         child: FloatingActionButton.small(
           onPressed: _initLocation,
           backgroundColor: const Color(0xFF1B2838),
           child: const Icon(Icons.my_location, color: Color(0xFF4FC3F7)),
         ),
-      ),
-    );
-  }
-
-  Widget _buildSearchBar() {
-    return GestureDetector(
-      onTap: () => setState(() => _searchBarExpanded = !_searchBarExpanded),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1B2838).withAlpha(242),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withAlpha(77),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.search, color: Color(0xFF4FC3F7), size: 22),
-            const SizedBox(width: 10),
-            const Expanded(
-              child: Text(
-                'Search accessible route...',
-                style: TextStyle(color: Colors.white54, fontSize: 15),
-              ),
-            ),
-            Icon(
-              _searchBarExpanded
-                  ? Icons.keyboard_arrow_up
-                  : Icons.keyboard_arrow_down,
-              color: Colors.white38,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearchFields() {
-    return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1B2838).withAlpha(242),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _startController,
-            style: const TextStyle(color: Colors.white, fontSize: 14),
-            decoration: InputDecoration(
-              hintText: 'Start: lat, lng',
-              hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
-              prefixIcon: const Icon(
-                Icons.trip_origin,
-                color: Color(0xFF4CAF50),
-                size: 18,
-              ),
-              filled: true,
-              fillColor: const Color(0xFF253547),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide.none,
-              ),
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            ),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _destController,
-            style: const TextStyle(color: Colors.white, fontSize: 14),
-            decoration: InputDecoration(
-              hintText: 'Destination: lat, lng',
-              hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
-              prefixIcon: const Icon(
-                Icons.location_on,
-                color: Color(0xFFEF5350),
-                size: 18,
-              ),
-              filled: true,
-              fillColor: const Color(0xFF253547),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-                borderSide: BorderSide.none,
-              ),
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: _handleSearch,
-              icon: const Icon(Icons.directions_walk, size: 18),
-              label: const Text('Find Route'),
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF1565C0),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
